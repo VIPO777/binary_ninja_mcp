@@ -1,3 +1,4 @@
+import os
 import binaryninja as bn
 from .core.config import Config
 from .server.http_server import MCPServer
@@ -74,6 +75,10 @@ class BinaryNinjaMCP:
 
 
 plugin = BinaryNinjaMCP()
+
+# Feature flags (opt-in to avoid heavy work during startup)
+_UI_ENABLED = os.environ.get("BN_MCP_ENABLE_UI", "0") == "1"
+_AUTOSTART_ENABLED = os.environ.get("BN_MCP_AUTOSTART", "0") == "1"
 
 
 def _apply_settings_to_config():
@@ -605,51 +610,55 @@ try:
             except Exception:
                 pass
 
-    ui.UIContext.registerNotification(_MCPMaxUINotification())
-    bn.log_info("MCP Max UI notifications installed")
-    # Ensure status control is present at startup with retries
-    _schedule_status_init()
-    _start_indicator_watcher()
-    _start_bv_monitor()
+    if _UI_ENABLED:
+        ui.UIContext.registerNotification(_MCPMaxUINotification())
+        bn.log_info("MCP Max UI notifications installed")
+        # Ensure status control is present at startup with retries
+        _schedule_status_init()
+        _start_indicator_watcher()
+        _start_bv_monitor()
+    else:
+        bn.log_debug("MCP Max UI features disabled (BN_MCP_ENABLE_UI!=1)")
 except Exception as e:
     # UI not available (headless) or API mismatch; ignore
     bn.log_debug(f"MCP Max UI notifications not installed: {e}")
 
-# Attempt an immediate autostart if a BV is already open (e.g., .bndb loaded)
-try:
-    from binaryninjaui import UIContext
-    ctx = UIContext.activeContext()
-    if ctx:
-        vf = ctx.getCurrentViewFrame()
-        if vf and hasattr(vf, "getCurrentBinaryView"):
-            bv = vf.getCurrentBinaryView()
-            if bv:
-                _try_autostart_for_bv(bv)
-    # Schedule a few retries on the UI thread to catch late BV availability
+if _AUTOSTART_ENABLED:
+    # Attempt an immediate autostart if a BV is already open
     try:
-        import binaryninjaui as ui
-        from PySide6.QtCore import QTimer
+        from binaryninjaui import UIContext
+        ctx = UIContext.activeContext()
+        if ctx:
+            vf = ctx.getCurrentViewFrame()
+            if vf and hasattr(vf, "getCurrentBinaryView"):
+                bv = vf.getCurrentBinaryView()
+                if bv:
+                    _try_autostart_for_bv(bv)
+        try:
+            import binaryninjaui as ui
+            from PySide6.QtCore import QTimer
 
-        def _kick_autostart():
-            try:
-                ctx2 = UIContext.activeContext()
-                if ctx2:
-                    vf2 = ctx2.getCurrentViewFrame()
-                    if vf2 and hasattr(vf2, "getCurrentBinaryView"):
-                        bv2 = vf2.getCurrentBinaryView()
-                        if bv2:
-                            _try_autostart_for_bv(bv2)
-                # also ensure status control exists after UI is fully ready
-                _schedule_status_init()
-            except Exception as _e:
-                bn.log_debug(f"MCP Max auto-start retry error: {_e}")
+            def _kick_autostart():
+                try:
+                    ctx2 = UIContext.activeContext()
+                    if ctx2:
+                        vf2 = ctx2.getCurrentViewFrame()
+                        if vf2 and hasattr(vf2, "getCurrentBinaryView"):
+                            bv2 = vf2.getCurrentBinaryView()
+                            if bv2:
+                                _try_autostart_for_bv(bv2)
+                    _schedule_status_init()
+                except Exception as _e:
+                    bn.log_debug(f"MCP Max auto-start retry error: {_e}")
 
-        for delay in (200, 500, 1000, 1500, 2000):
-            ui.execute_on_main_thread(lambda d=delay: QTimer.singleShot(d, _kick_autostart))
+            for delay in (200, 500, 1000, 1500, 2000):
+                ui.execute_on_main_thread(lambda d=delay: QTimer.singleShot(d, _kick_autostart))
+        except Exception:
+            pass
     except Exception:
         pass
-except Exception:
-    pass
+else:
+    bn.log_debug("MCP Max autostart disabled (BN_MCP_AUTOSTART!=1)")
 
 def _is_server_running() -> bool:
     try:
@@ -682,13 +691,6 @@ bn.log_info("Binary Ninja MCP plugin loaded successfully")
 
 # Auto-start and settings UI removed
 
-# One-time MCP client auto-setup: install bridge entry into popular MCP clients
-try:
-    from .utils.auto_setup import install_mcp_clients
-    _ = install_mcp_clients(quiet=True)
-except Exception:
-    # Best-effort; ignore failures to avoid disrupting plugin load
-    pass
 
 # Register global handler to discover and track all opened BinaryViews
 try:
